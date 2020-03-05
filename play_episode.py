@@ -36,7 +36,7 @@ import matplotlib.animation as animation
 
 import random
 
-_Num_Agents = 1
+_Num_Agents = 2
 _Environments = {'currents':True,'solar':False}
 
 
@@ -114,18 +114,9 @@ def plot_animation(environment, agents, lons, lats, Time_List):
     fig, ax = plt.subplots(figsize=(12, 6),
                        subplot_kw={'projection': LowerThresholdPlateCarree()})
 
-    agent_pose = None
+    def animate(datetime_t, agents, environment):
+        plt.cla()
 
-    # # Add agent positions
-    # for agent_name in agents:
-    #     agent_data = agents[agent_name].data.interp(time = Time_List[0])
-    #     agent_lon = agent_data.lon.values
-    #     agent_lat = agent_data.lat.values
-    #     agent_pose = ax.plot(agent_lon, agent_lat, 'o', transform=ccrs.PlateCarree(),color='r')
-
-    # line, = ax.plot([], [], 'o', transform=ccrs.PlateCarree(),color='r')
-
-    def init_run():
         grid_lines =ax.gridlines(draw_labels=True)
         grid_lines.xformatter = LONGITUDE_FORMATTER
         grid_lines.yformatter = LATITUDE_FORMATTER
@@ -135,39 +126,28 @@ def plot_animation(environment, agents, lons, lats, Time_List):
 
         ax.plot(lons, lats, transform=ccrs.PlateCarree(),color='m')
         ax.plot(lons, lats, transform=ccrs.Geodetic(),color='b')
-        return ax
 
-        # line.set_data([], [],'o', transform=ccrs.PlateCarree(),color='r')
-
-
-    def animate(i, agents, Time_List):
-        index = i%len(Time_List)
-        datetime_t = Time_List[index]
-        lons = [random.randint(-82, -60),random.randint(-82, -60)]
-        lats = [random.randint(20, 44),random.randint(20, 44)]
-        # random.randint(-180,180)
         ax.set_title('US Costal Patrol\n' + f'({datetime64_2_datetime(datetime_t)})',pad=20)
 
-        agent_data = agents['Agent_0'].data.interp(time = Time_List[index])
-        agent_lon = agent_data.lon.values
-        agent_lat = agent_data.lat.values
-        # line.set_data(agent_lon, agent_lat, 'o', transform=ccrs.PlateCarree(),color='r')
-
         for agent_name in agents:
-            agent_data = agents[agent_name].data.interp(time = Time_List[index])
+            agent_data = agents[agent_name].data.interp(time = datetime_t)
             agent_lon = agent_data.lon.values
             agent_lat = agent_data.lat.values
             agent_pose = ax.plot(agent_lon, agent_lat, 'o', transform=ccrs.PlateCarree(),color='r')
-             # = ax.plot(agent_lon, agent_lat, 'o', transform=ccrs.PlateCarree(),color='r')
-
         
-        
-        # ax.plot(lons, lats, transform=ccrs.Geodetic(),color='b')
-        pass
+        # ax.plot(agent_lon, agent_lat, 'o', transform=ccrs.PlateCarree(),color='r')
 
-    ani = animation.FuncAnimation(fig, animate, init_func=init_run, interval=10, fargs=(agents, Time_List,), blit=True)
+        environment = environment.interp(time = datetime_t)
+        # ax.add_feature(Nightshade(datetime64_2_datetime(datetime_t), alpha=0.2))
+        magnitude = (environment.u.values[:,:] ** 2 + environment.v.values[:,:] ** 2) ** 0.5
+        lon = environment.longitude.values
+        lon[lon>180] = lon[lon>180] - 360
+        ax.quiver(environment.longitude[:], environment.latitude[:], environment.u[:][:], environment.v[:][:], magnitude, transform=ccrs.PlateCarree())
+        # ax.streamplot(lon, environment.latitude.values[:], environment.u.values[:,:], environment.v.values[:,:], density=2, color=magnitude, transform=ccrs.PlateCarree())
+        ax.contourf(lon, environment.latitude.values[:], magnitude, transform=ccrs.PlateCarree(), alpha=0.2)
+        # plt.colorbar()
+    ani = animation.FuncAnimation(fig, animate, frames=Time_List, interval=100, fargs=(agents,environment))
 
-    plt.tight_layout()
     plt.show()
 
 def plot_env(environment, agents, lons, lats, datetime_t):
@@ -229,7 +209,10 @@ def plot_env(environment, agents, lons, lats, datetime_t):
     ax.add_feature(Nightshade(datetime64_2_datetime(datetime_t), alpha=0.2))
 
     # ax.quiver(environment.longitude[:], environment.latitude[:], environment.u[0][0][:][:], environment.v[0][0][:][:], transform=ccrs.PlateCarree())
-    ax.quiver(environment.longitude[:], environment.latitude[:], environment.u[:][:], environment.v[:][:], transform=ccrs.PlateCarree())
+    # ax.quiver(environment.longitude[:], environment.latitude[:], environment.u[:][:], environment.v[:][:], transform=ccrs.PlateCarree())
+    magnitude = (environment.u.values[:,:] ** 2 + environment.v.values[:,:] ** 2) ** 0.5
+    # print(magnitude)
+    # ax.streamplot(environment.longitude.values[:], environment.latitude.values[:], environment.u.values[:,:], environment.v.values[:,:], density=2, color=magnitude, transform=ccrs.PlateCarree())
 
     plt.show()
     return 1
@@ -297,6 +280,7 @@ def get_goal_list(ave_speed, earth, distance, start_point, endpoint, forward_azi
     a1 = forward_azimuth_start
     ave_speed = distance/540 #m/s
     step_distance = ave_speed 
+    print(f'Step Distance: {step_distance}')
     for step in range(540):
         long_goal, lat_goal, _ = get_geo_direct(earth, point1, a1, step_distance)
         goal_list.append([long_goal, lat_goal])
@@ -385,7 +369,14 @@ class Agent:
                     coords={"time": times})
         self.data = ds
         return 1
-
+def set_agents_deployment(agents, start_datetime):
+    for i_key, key in enumerate(agents):
+        print(f'Enumerate Agents\n{i_key}, {key}')
+        # agents[agent].init_time =
+    # agents['Agent_0'].init_time = start_datetime
+    # print(agents['Agent_0'].init_time)
+    # agents['Agent_1'].init_time = start_datetime + np.timedelta64(10,'D') # Time range of simulation
+    
 
 def main():
     agents = {}
@@ -400,11 +391,13 @@ def main():
     # Initialize Start Time, Stop Time, and Time Interval
     start_datetime = get_start_date(environment_dataset)
     datetime_t = start_datetime # current time counter that increases with simulation
+    print()
     print(f'Start Date: {start_datetime}')
 
     date_range = np.timedelta64(100,'D') # Time range of simulation
     stop_datetime = start_datetime + date_range
     print(f'Stop Date: {stop_datetime}')
+    print()
 
 
     # Build earth
@@ -413,6 +406,7 @@ def main():
     start_point, endpoint, transit_distance, forward_azimuth_start = get_route(earth)
     ave_speed = 2 # knots
     goal_list = get_goal_list(ave_speed, earth, transit_distance, start_point, endpoint, forward_azimuth_start)
+    transit_leg_hrs = transit_distance
     print(f'Transit Distance: {transit_distance/1000} km, Start [Lon,Lat]: {start_point}, End [Lon,Lat]: {endpoint}, Initial Heading: {forward_azimuth_start}')
     print() 
     # print(goal_list)
@@ -441,7 +435,8 @@ def main():
     # MUST UPDATE TO INCLUDE LOOPING THOUGH AGENTS AND SETTING START TIMES. OTW OTHER AGENTS WOULD BREAK CODE!
     agents['Agent_0'].init_time = start_datetime
     print(agents['Agent_0'].init_time)
-
+    agents['Agent_1'].init_time = start_datetime + np.timedelta64(10,'D') # Time range of simulation
+    set_agents_deployment(agents, start_datetime)
 
     simulation_timestep = np.timedelta64(1,'h')
     # Time_List = np.arange(start_datetime,stop_datetime,simulation_timestep)
@@ -469,11 +464,12 @@ def main():
             # plot_env(environment, agents, *sample_America(), datetime_t)
             pass
             
-    
+    # plot_env(environment, agents, *sample_America(), datetime_t)
+
     plot_animation(environment, agents, *sample_America(), Time_List)
 
 
-
+   
 
 
     # times = agents['Agent_0'].history.pop('time')
