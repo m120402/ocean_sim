@@ -35,8 +35,9 @@ import pandas as pd
 import matplotlib.animation as animation
 
 import random
+import math
 
-_Num_Agents = 2
+_Num_Agents = 4
 _Environments = {'currents':True,'solar':False}
 
 
@@ -146,7 +147,9 @@ def plot_animation(environment, agents, lons, lats, Time_List):
         # ax.streamplot(lon, environment.latitude.values[:], environment.u.values[:,:], environment.v.values[:,:], density=2, color=magnitude, transform=ccrs.PlateCarree())
         ax.contourf(lon, environment.latitude.values[:], magnitude, transform=ccrs.PlateCarree(), alpha=0.2)
         # plt.colorbar()
-    ani = animation.FuncAnimation(fig, animate, frames=Time_List, interval=100, fargs=(agents,environment))
+
+    # ani = animation.FuncAnimation(fig, animate, frames=Time_List, interval=100, fargs=(agents,environment))
+    ani = animation.FuncAnimation(fig, animate, frames=list(itertools.islice(Time_List, 0, len(Time_List), 8)), interval=10, fargs=(agents,environment))
 
     plt.show()
 
@@ -268,25 +271,30 @@ def get_route(earth):
     #      [Lat,Long]  [Lat,Long] (m)     (degrees)
     return start_point, end_point, distance, forward_azimuth_start
 
-def get_goal_list(ave_speed, earth, distance, start_point, endpoint, forward_azimuth_start):
+def get_goal_list(ave_speed_goal, earth, distance, start_point, endpoint, forward_azimuth_start):
     '''
-    Calculate a list of goal points evenly spaced between the start and end track points for a certain speed of transit.
+    Calculate a list of goal points evenly spaced between the start and end track points for a certain goal speed of transit.
     Assumes hourly updates.
     '''
     goal_list = []
     point1 = start_point
     goal_list.append(start_point)
     point2 = endpoint
-    a1 = forward_azimuth_start
-    ave_speed = distance/540 #m/s
+    a1 = forward_azimuth_start #course ship takes at start to drive towards end point along great circle 
+    ave_speed_goal = knots_2_m_s_(ave_speed_goal) # m/s
+    ave_speed_goal = ave_speed_goal*3600 # m/hr
+    # use floor to go slightly faster on average
+    subdivisions = math.floor(distance/ave_speed_goal) # num of hours to reach goal = num of timesteps
+    ave_speed = distance/subdivisions
+    print(f'Average Speed: {ave_speed/3600} m/s, {m_s_2_knots(ave_speed/3600)} knots')
     step_distance = ave_speed 
     print(f'Step Distance: {step_distance}')
-    for step in range(540):
+    for step in range(subdivisions):
         long_goal, lat_goal, _ = get_geo_direct(earth, point1, a1, step_distance)
         goal_list.append([long_goal, lat_goal])
         point1 = [long_goal, lat_goal]
         _, a1 = get_geo_inverse(earth, point1, point2)
-    return goal_list
+    return goal_list, subdivisions
 
 
 class Agent:
@@ -334,7 +342,7 @@ class Agent:
         goal_count = next(self.goal_pos_counter)
         # If goal count < 0, then we are back home and need to turn back to far goal
         if goal_count < 0:
-            print('MADE TURN FAR')
+            print('MADE HOME')
             self.goal_pos_counter = itertools.count(1)
             goal_count = next(self.goal_pos_counter)
         # OTW if goal count is < [len(goal_list) - 1], keep going
@@ -342,7 +350,7 @@ class Agent:
             t = 3
         # OTW time to turn back toward home     
         else:
-            print('MADE TURN HOME')
+            print('MADE FAR')
             self.goal_pos_counter = itertools.count(len(self.goal_list)-1,-1)
             goal_count = next(self.goal_pos_counter)
         # print(f'Len Goal List: {len(self.goal_list)}')
@@ -369,10 +377,13 @@ class Agent:
                     coords={"time": times})
         self.data = ds
         return 1
-def set_agents_deployment(agents, start_datetime):
-    for i_key, key in enumerate(agents):
-        print(f'Enumerate Agents\n{i_key}, {key}')
-        # agents[agent].init_time =
+def set_agents_deployment(agents, start_datetime, transit_leg_hrs):
+    hrs_spacing = transit_leg_hrs/len(agents)
+    for i_key, agent in enumerate(agents):
+        print(f'Enumerate Agents\n{i_key}, {agent}')
+        # print(i_key * hrs_spacing)
+        # print(np.timedelta64(int(i_key * hrs_spacing),'h'))
+        agents[agent].init_time =start_datetime + np.timedelta64(int(i_key * hrs_spacing),'h')
     # agents['Agent_0'].init_time = start_datetime
     # print(agents['Agent_0'].init_time)
     # agents['Agent_1'].init_time = start_datetime + np.timedelta64(10,'D') # Time range of simulation
@@ -402,25 +413,26 @@ def main():
 
     # Build earth
     earth = geo.Geodesic()
+
     # Get route info
     start_point, endpoint, transit_distance, forward_azimuth_start = get_route(earth)
     ave_speed = 2 # knots
-    goal_list = get_goal_list(ave_speed, earth, transit_distance, start_point, endpoint, forward_azimuth_start)
-    transit_leg_hrs = transit_distance
+    goal_list, subdivisions = get_goal_list(ave_speed, earth, transit_distance, start_point, endpoint, forward_azimuth_start)
+    transit_leg_hrs = subdivisions
     print(f'Transit Distance: {transit_distance/1000} km, Start [Lon,Lat]: {start_point}, End [Lon,Lat]: {endpoint}, Initial Heading: {forward_azimuth_start}')
     print() 
-    # print(goal_list)
 
     # Initialize local environment and agents
     # environment = set_environment(start_datetime, environment_dataset)
     environment = set_environment(environment_dataset)
+    print('Environment___________')
+    print(environment)
 
-    # time = current_datetime
-
+    # Build Agents
     print('Building Agents')
     for agentname in range(_Num_Agents):
         agents[f'Agent_{agentname}'] = Agent()
-    print(agents)
+    print(list(agents.keys()))
 
 
     # conda install -c conda-forge requests 
@@ -436,11 +448,11 @@ def main():
     agents['Agent_0'].init_time = start_datetime
     print(agents['Agent_0'].init_time)
     agents['Agent_1'].init_time = start_datetime + np.timedelta64(10,'D') # Time range of simulation
-    set_agents_deployment(agents, start_datetime)
+    set_agents_deployment(agents, start_datetime, transit_leg_hrs)
 
     simulation_timestep = np.timedelta64(1,'h')
     # Time_List = np.arange(start_datetime,stop_datetime,simulation_timestep)
-    Time_List = np.arange(start_datetime,start_datetime + np.timedelta64(541,'h'),simulation_timestep)
+    Time_List = np.arange(start_datetime,start_datetime + np.timedelta64(transit_leg_hrs+1,'h'),simulation_timestep)
 
     for datetime_t in Time_List:
         for agent in agents:
