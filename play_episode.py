@@ -37,8 +37,16 @@ import matplotlib.animation as animation
 import random
 import math
 
-_Num_Agents = 4
+import sys
+sys.path.append('../programs')
+
+import monoHFC as design
+import pickle
+
+
+_Num_Agents = 1
 _Environments = {'currents':True,'solar':False}
+_Write = False
 
 
 class LowerThresholdRobinson(ccrs.Robinson):
@@ -223,7 +231,7 @@ def plot_env(environment, agents, lons, lats, datetime_t):
 def m_s_2_knots(m_s):
     return m_s * 1.94384
 
-def knots_2_m_s_(knots):
+def knots_2_m_s(knots):
     return knots * 0.514444
 
 def get_start_date(dataset):
@@ -281,7 +289,7 @@ def get_goal_list(ave_speed_goal, earth, distance, start_point, endpoint, forwar
     goal_list.append(start_point)
     point2 = endpoint
     a1 = forward_azimuth_start #course ship takes at start to drive towards end point along great circle 
-    ave_speed_goal = knots_2_m_s_(ave_speed_goal) # m/s
+    ave_speed_goal = knots_2_m_s(ave_speed_goal) # m/s
     ave_speed_goal = ave_speed_goal*3600 # m/hr
     # use floor to go slightly faster on average
     subdivisions = math.floor(distance/ave_speed_goal) # num of hours to reach goal = num of timesteps
@@ -296,23 +304,87 @@ def get_goal_list(ave_speed_goal, earth, distance, start_point, endpoint, forwar
         _, a1 = get_geo_inverse(earth, point1, point2)
     return goal_list, subdivisions
 
+class plant():
+    def __init__(self):
+        # Maxeon 400 W
+        # https://static1.squarespace.com/static/5354537ce4b0e65f5c20d562/t/5cf6764c6002390001d39a4d/1559656028949/SunPower+Maxeon+3-400-390-370-au_0+Specification+Sheet+2019.pdf
+        # https://www.solar-electric.com/learning-center/solar-charge-controller-basics.html/
+        self.solar_rating = 400/(1.69*1.046) # W/m2 @ STC
+        self.MPPT_eff = 0.95 # maximum power point tracking
+        self.inverter_eff = 0.98 # Inverter efficiency
+        self.STC_irradiance = 1000 # Standard Test Conditions (1000 W/m2 irradiance, AM 1.5, 25° C)
+        self.hotel_load = 4.1035 # kW
+        self.LHV_H2 = 120.21 #MJ/kg
+        self.HFC_efficiency = 0.69 # Efficiency at 20% load
+        self.H2_Max = 427.5 # Kg of hydrogen gas at 500 bar (stored in 300L canisters)
+        self.Batt_Max = 675.0 # kWh
+        self.hrs_effective_solar = 5 # 5 hours of rated power daily
+        self.boat = None
+        self.max_solar_power_in = None
+        self.max_solar_daily_average = None
 
-class Agent:
-    def __init__(self, init_time = None, pose = [None,None,None], goal = None):
-        self.batt = 100
-        self.H2 = 100
+    def get_boat(self):
+        self.boat = design.Opt_Hull()
+        x0 = [50]
+        sol = self.boat.minima(x0)
+        # self.boat = sol
+        self.hotel_load = self.boat.hfc.HotelLoads
+        self.solar_area = self.boat.deckArea
+        self.max_solar_power_in = self.boat.solar.solar_area * self.solar_rating/1000 # kW
+        self.max_solar_daily_average = self.max_solar_power_in * self.hrs_effective_solar * self.MPPT_eff * self.inverter_eff #kWh
+        print(f'MAX SOLAR DAILY AVERAGE: {self.max_solar_daily_average} kWh')
+class Agent():
+    def __init__(self, earth = geo.Geodesic(), init_time = None, pose = [None,None,None], goal = None):
+        # Init Stuff
+        self.earth = earth
         self.released = False
         self.init_time = init_time
-        self.pose = pose # long, lat, heading
-        self.goal = goal
         self.goal_list = None
         self.goal_pos_counter = None
         self.start_offset = None
-        self.time = None
-        self.history = {'time':[], 'pose_lon':[], 'pose_lat':[], 'goal_lon':[], 'goal_lat':[], 'batt':[], 'H2':[]}
+        self.plant = plant()
+        self.plant.get_boat()
+
+        # State
+        self.pose = pose # long, lat, heading
+        self.goal = goal
+        self.time = None 
+        self.batt = None
+        self.H2 = None
+        self.heading = None
+        self.STW = None
+        self.u = None
+        self.v = None
+        self.irradiance = None
+
+        # Data Storage
+        self.history = {'time':[], 'pose_lon':[], 'pose_lat':[], 'goal_lon':[], 'goal_lat':[], 'solar':[], 'batt':[], 'H2':[], 'heading':[], 'STW':[], 'irradiance':[], 'u':[], 'v':[]}
         self.data = None
-    def setgoal(self, time, route = 'straight', goal_list = None, start_offset = 0):
+    def action(self, distance, course):
+        minval = 0.00001
+        u = self.u
+        v = self.v
+        u_goal = distance * math.cos(math.radians(course))/3600
+        v_goal = distance * math.sin(math.radians(course))/3600
+
+        u_req = u_goal - u
+        v_req = v_goal - v
+        den = v_req if abs(v_req) > minval else minval
+        heading = math.degrees(math.atan2(u_req,den))
+        STW = np.hypot(u_req,v_req)
+        return heading, STW
+    def propulsion_power(self):
+        speed_kts = m_s_2_knots(self.STW)
+        _, power = self.plant.boat.set_res_and_power_holtrop(speed_kts)
+        # print(f'Speed: {speed_kts}\nPower: {power/1000}')
+        return power/1000
+    def get_irradiance(self,hour, irradiance):
+        pass
+
+    def setgoal(self, time, route = 'straight', goal_list = None, start_offset = 0, currents = [0,0], irradiance = 1000):
         self.time = time
+        pd_time = pd.to_datetime(time)
+        hour = pd_time.hour
         if route == 'straight':
             if goal_list == None: # ie not passed a list
                 lons, lats = sample_America()
@@ -334,15 +406,24 @@ class Agent:
                 self.goal = [lon_g,lat_g]
         else:
             print('IMPLIMENT INTELLIGENCE')
+        # Start Full
+        self.batt, self.H2 = 100, 100
+        distance, course = get_geo_inverse(self.earth, self.pose, self.goal)
+        self.u, self.v = currents.u.values, currents.v.values
+        self.irradiance = irradiance
+        self.heading, self.STW = self.action(distance, course)
+        # print(f'FIRST COURSE = {course}')
         self.append_history()
         return 1
-    def update(self, time):
+    def update(self, time, currents = [0,0], irradiance = 1000):
         self.time = time
+        pd_time = pd.to_datetime(time)
+        hour = pd_time.hour
         self.pose = self.goal
         goal_count = next(self.goal_pos_counter)
         # If goal count < 0, then we are back home and need to turn back to far goal
         if goal_count < 0:
-            print('MADE HOME')
+            # print('MADE HOME')
             self.goal_pos_counter = itertools.count(1)
             goal_count = next(self.goal_pos_counter)
         # OTW if goal count is < [len(goal_list) - 1], keep going
@@ -350,15 +431,65 @@ class Agent:
             t = 3
         # OTW time to turn back toward home     
         else:
-            print('MADE FAR')
+            # print('MADE FAR')
             self.goal_pos_counter = itertools.count(len(self.goal_list)-1,-1)
             goal_count = next(self.goal_pos_counter)
-        # print(f'Len Goal List: {len(self.goal_list)}')
-        # print(f'Goal Count Index: {goal_count}')
         lon_g, lat_g = self.goal_list[goal_count][:]
         self.goal = [lon_g,lat_g]
+
+        # Use old environmental contitions to calculate plant state
+        self.transition() #sets solar, batt, H2
+        # Set New environmental conditions for next time step
+        distance, course = get_geo_inverse(self.earth, self.pose, self.goal)
+        self.u, self.v = currents.u.values, currents.v.values
+        self.irradiance = irradiance
+        self.heading, self.STW = self.action(distance, course)
+        # print(f'FIRST COURSE = {course}')
         self.append_history()
         return 1
+    def transition(self):
+        '''
+        Calculates the solar % rating, Battery % charge, and H2 % fuel using previous timesteps
+        state [irradiance, batt, H2, STW]
+        '''
+        # Assumed until later updated to be dynamic
+        time_unit = np.timedelta64(1,'h')
+        hours_passed = (time_unit/np.timedelta64(1,'h'))
+
+        propulsion_power = self.propulsion_power()
+        load_power = propulsion_power + self.plant.hotel_load # kW
+        load_energy_out = load_power * hours_passed # kWh
+        # Later account for Temp STC adjustment
+        solar_in = self.plant.max_solar_power_in * (5/24) * (self.irradiance / self.plant.STC_irradiance)
+        batt_in = solar_in * self.plant.MPPT_eff
+        # Later modulate max solar daily average by actual STC irradiance fraction
+        max_batt_out = (self.plant.max_solar_daily_average / 24)* hours_passed
+        if (load_energy_out / self.plant.inverter_eff) > max_batt_out:
+            batt_out = max_batt_out 
+        else:
+            batt_out = load_energy_out / self.plant.inverter_eff
+        if self.batt <= 50:
+            batt_out = 0
+        HFC_out = max(0,(load_energy_out - batt_out * self.plant.inverter_eff) / self.plant.inverter_eff) #kWh
+        H2_out = HFC_out * 3600 / (1000 * self.plant.LHV_H2) / self.plant.HFC_efficiency
+        self.H2 -= (H2_out/self.plant.H2_Max)
+        self.H2 = max(0, self.H2)
+        batt_net = batt_in - batt_out
+        batt_per_change = batt_net / self.plant.Batt_Max
+        self.batt += batt_per_change
+        self.batt = min(100, self.batt)
+        # print()
+        # print(f'max_solar_power_in: {self.plant.max_solar_power_in}')
+        # print(f"solar_in: {solar_in}")
+        # print(f"batt_in: {batt_in}")
+        # print(f"load_energy_out: {load_energy_out}")
+        # print(f"max_batt_out: {max_batt_out}")
+        # print(f'Self_Batt: {self.batt}')
+        # print(f'Batt Out: {batt_out}')
+        # print(f'HFC_out: {HFC_out}')
+        # print(f'H2_out: {H2_out}')
+        # print(f'Self H2: {self.H2}')
+
     def append_history(self):
         self.history['time'].append(self.time)
         self.history['pose_lon'].append(self.pose[0])
@@ -367,27 +498,43 @@ class Agent:
         self.history['goal_lat'].append(self.goal[1])
         self.history['batt'].append(self.batt)
         self.history['H2'].append(self.H2)
+        self.history['heading'].append(self.heading)
+        self.history['STW'].append(self.STW)
+        self.history['u'].append(self.u)
+        self.history['v'].append(self.v)
+        self.history['irradiance'].append(self.irradiance)
         return 1
     def store_data(self):
         times = self.history['time']
         pose_lon = self.history['pose_lon']
         pose_lat = self.history['pose_lat']
+        goal_lon = self.history['goal_lon']
+        goal_lat = self.history['goal_lat']
+        batt = self.history['batt']
+        H2 = self.history['H2']
+        heading = self.history['heading']
+        STW = self.history['STW']
+        u = self.history['u']
+        v = self.history['v']
+        irradiance = self.history['irradiance']
         ds = xr.Dataset(data_vars={"lon":(["time"],pose_lon), 
-                               "lat":(["time"],pose_lat)}, 
+                               "lat":(["time"],pose_lat), 
+                               "goal_lon":(["time"],goal_lon), 
+                               "goal_lat":(["time"],goal_lat), 
+                               "batt":(["time"],batt), 
+                               "H2":(["time"],H2), 
+                               "heading":(["time"],heading), 
+                               "STW":(["time"],STW), 
+                               "u":(["time"],u), 
+                               "v":(["time"],v), 
+                               "irradiance":(["time"],irradiance)}, 
                     coords={"time": times})
         self.data = ds
         return 1
 def set_agents_deployment(agents, start_datetime, transit_leg_hrs):
-    hrs_spacing = transit_leg_hrs/len(agents)
+    hrs_spacing = transit_leg_hrs*2/len(agents)
     for i_key, agent in enumerate(agents):
-        print(f'Enumerate Agents\n{i_key}, {agent}')
-        # print(i_key * hrs_spacing)
-        # print(np.timedelta64(int(i_key * hrs_spacing),'h'))
-        agents[agent].init_time =start_datetime + np.timedelta64(int(i_key * hrs_spacing),'h')
-    # agents['Agent_0'].init_time = start_datetime
-    # print(agents['Agent_0'].init_time)
-    # agents['Agent_1'].init_time = start_datetime + np.timedelta64(10,'D') # Time range of simulation
-    
+        agents[agent].init_time =start_datetime + np.timedelta64(int(i_key * hrs_spacing),'h')    
 
 def main():
     agents = {}
@@ -425,11 +572,11 @@ def main():
     # Initialize local environment and agents
     # environment = set_environment(start_datetime, environment_dataset)
     environment = set_environment(environment_dataset)
-    print('Environment___________')
-    print(environment)
+    # print('Environment___________')
+    # print(environment)
 
     # Build Agents
-    print('Building Agents')
+    print('Building Agents:')
     for agentname in range(_Num_Agents):
         agents[f'Agent_{agentname}'] = Agent()
     print(list(agents.keys()))
@@ -439,48 +586,67 @@ def main():
 
     # date = datetime(1999, 12, 31, 12)
     
-
-    # print(environment)
-    # print(environment[{'time': environment['time'] == np.datetime64(datetime_t)}]['time'])
-    # print(environment.drop('year')['time'])
-
     # MUST UPDATE TO INCLUDE LOOPING THOUGH AGENTS AND SETTING START TIMES. OTW OTHER AGENTS WOULD BREAK CODE!
-    agents['Agent_0'].init_time = start_datetime
-    print(agents['Agent_0'].init_time)
-    agents['Agent_1'].init_time = start_datetime + np.timedelta64(10,'D') # Time range of simulation
     set_agents_deployment(agents, start_datetime, transit_leg_hrs)
 
     simulation_timestep = np.timedelta64(1,'h')
     # Time_List = np.arange(start_datetime,stop_datetime,simulation_timestep)
-    Time_List = np.arange(start_datetime,start_datetime + np.timedelta64(transit_leg_hrs+1,'h'),simulation_timestep)
+    # Time_List = np.arange(start_datetime,start_datetime + np.timedelta64(transit_leg_hrs+1,'h'),simulation_timestep)
+    Time_List = np.arange(start_datetime,start_datetime + np.timedelta64(365*2,'D'),simulation_timestep)
 
-    for datetime_t in Time_List:
+    # _Write = True
+    if _Write:
+        for datetime_t in Time_List:
+            for agent in agents:
+                if agents[agent].released:
+                    # currents = environment.interp(time = datetime_t, longitude = agents[agent].pose[0] + 360, latitude = agents[agent].pose[1])                
+                    currents = environment.sel(time = datetime_t, longitude = agents[agent].pose[0] + 360, latitude = agents[agent].pose[1], method='nearest')                
+                    # agents[agent].update(datetime_t)
+                    agents[agent].update(datetime_t, currents= currents)
+                if agents[agent].init_time <= datetime_t and agents[agent].released == False:
+                    agents[agent].released = True
+                    currents = environment.interp(time = datetime_t, longitude = start_point[0] + 360, latitude = start_point[1])
+                    agents[agent].setgoal(datetime_t, route = 'straight', goal_list = goal_list, start_offset = 0, currents= currents)
+                    print(f'Release {agent}')
+
+        # Store data
         for agent in agents:
-            if agents[agent].released:
-                # print(f'Datetime: {datetime_t}')
-                # print(f'Update {agent}')
-                agents[agent].update(datetime_t)
-                # print(f'Pose: {agents[agent].pose} \nGoal: {agents[agent].goal}')
-            if agents[agent].init_time <= datetime_t and agents[agent].released == False:
-                agents[agent].released = True
-                agents[agent].setgoal(datetime_t, route = 'straight', goal_list = goal_list, start_offset = 0)
-                print(f'Release {agent}')
+            agents[agent].store_data()
+            # print(f'\n{agent} Data Xarray: \n{agents[agent].data}')
 
-    # Store data
-    for agent in agents:
-        agents[agent].store_data()
-        print(f'\n{agent} Data Xarray: \n{agents[agent].data}')
+        for i, datetime_t in enumerate(Time_List):
+            if i%240 == 0:
+                # plot_env(environment, agents, *sample_America(), datetime_t)
+                pass
+    
+    print()
+    print('Arrived Here')
 
-    for i, datetime_t in enumerate(Time_List):
-        if i%240 == 0:
-            # plot_env(environment, agents, *sample_America(), datetime_t)
-            pass
-            
+    # Pickle agents and their history:
+    if _Write:
+        with open('agents.pickle', 'wb') as w:
+            pickle_agents = {}
+            print('Dumping Pickle')
+            for agent in agents:
+                pickle_agents[agent] = Agent(earth = None)
+                pickle_agents[agent].data = agents[agent].data
+            pickle.dump(pickle_agents, w)
+
+    with open('agents.pickle', 'rb') as r:
+        # pickle.dump(agents['Agent_0'].data, f)
+        agents = pickle.load(r)
+        print('\nWant a pickle?')
+        print(agents)
+
     # plot_env(environment, agents, *sample_America(), datetime_t)
 
     plot_animation(environment, agents, *sample_America(), Time_List)
 
+    # print('\nAgent_0 Data')
+    # print(agents['Agent_0'].data)
 
+    # print('\nAll variables in state:')
+    # print(list(agents['Agent_0'].data.data_vars.keys()))
    
 
 
