@@ -16,6 +16,9 @@
 # Animation
 # https://towardsdatascience.com/animations-with-matplotlib-d96375c5442c
 
+# All Sky Condition
+# https://power.larc.nasa.gov/text/definitions.html
+
 import numpy as np
 import matplotlib.pyplot as plt
 import xarray as xr
@@ -41,12 +44,26 @@ import sys
 sys.path.append('../programs')
 
 import monoHFC as design
+import catHFC as cat_design
 import pickle
+from matplotlib import rcParams
 
+# To Do !!!!!!
+# Trace 360 degrees: make all internal long [-180,180]
+# add an End time attribute to each agent. Maybe once H2 at 10% or an amount that gets it back to homeport
+# Close solar branch
+# Make a pickle graph module that can handle numerous agents and start stop times
+# Make data reformat module instead on python notebook
+# Make it seamless to switch between nasa and EU currents
+# Refactor play episode to read config from yaml 
+# Add abiity to sample env for later machine learning application
+# Add state action transition ""
 
 _Num_Agents = 1
-_Environments = {'currents':True,'solar':False}
+_Environments = {'currents':True,'solar':True}
 _Write = False
+_Cat = False
+_Save_Ani = False
 
 
 class LowerThresholdRobinson(ccrs.Robinson):
@@ -120,29 +137,32 @@ def sample_curr(data, shape=(3, 9)):
 
 def plot_animation(environment, agents, lons, lats, Time_List):
 
-    fig, ax = plt.subplots(figsize=(12, 6),
+    # fig, ax = plt.subplots(figsize=(12, 6),
+    #                    subplot_kw={'projection': LowerThresholdPlateCarree()})
+    fig, ax = plt.subplots(1,2, figsize=(12, 6),
                        subplot_kw={'projection': LowerThresholdPlateCarree()})
 
     def animate(datetime_t, agents, environment):
-        plt.cla()
+        # plt.cla()
+        ax[0].cla()
 
-        grid_lines =ax.gridlines(draw_labels=True)
+        grid_lines =ax[0].gridlines(draw_labels=True)
         grid_lines.xformatter = LONGITUDE_FORMATTER
         grid_lines.yformatter = LATITUDE_FORMATTER
 
-        ax.set_extent([-82, -60, 20, 44])
-        ax.coastlines(resolution='10m') 
+        ax[0].set_extent([-82, -60, 20, 44])
+        ax[0].coastlines(resolution='10m') 
 
-        ax.plot(lons, lats, transform=ccrs.PlateCarree(),color='m')
-        ax.plot(lons, lats, transform=ccrs.Geodetic(),color='b')
+        ax[0].plot(lons, lats, transform=ccrs.PlateCarree(),color='m')
+        ax[0].plot(lons, lats, transform=ccrs.Geodetic(),color='b')
 
-        ax.set_title('US Costal Patrol\n' + f'({datetime64_2_datetime(datetime_t)})',pad=20)
+        ax[0].set_title('US Costal Patrol\n' + f'({datetime64_2_datetime(datetime_t)})',pad=20)
 
         for agent_name in agents:
             agent_data = agents[agent_name].data.interp(time = datetime_t)
             agent_lon = agent_data.lon.values
             agent_lat = agent_data.lat.values
-            agent_pose = ax.plot(agent_lon, agent_lat, 'o', transform=ccrs.PlateCarree(),color='r')
+            agent_pose = ax[0].plot(agent_lon, agent_lat, 'o', transform=ccrs.PlateCarree(),color='r')
         
         # ax.plot(agent_lon, agent_lat, 'o', transform=ccrs.PlateCarree(),color='r')
 
@@ -151,15 +171,64 @@ def plot_animation(environment, agents, lons, lats, Time_List):
         magnitude = (environment.u.values[:,:] ** 2 + environment.v.values[:,:] ** 2) ** 0.5
         lon = environment.longitude.values
         lon[lon>180] = lon[lon>180] - 360
-        ax.quiver(environment.longitude[:], environment.latitude[:], environment.u[:][:], environment.v[:][:], magnitude, transform=ccrs.PlateCarree())
+        ax[0].quiver(environment.longitude[:], environment.latitude[:], environment.u[:][:], environment.v[:][:], magnitude, transform=ccrs.PlateCarree())
         # ax.streamplot(lon, environment.latitude.values[:], environment.u.values[:,:], environment.v.values[:,:], density=2, color=magnitude, transform=ccrs.PlateCarree())
-        ax.contourf(lon, environment.latitude.values[:], magnitude, transform=ccrs.PlateCarree(), alpha=0.2)
+        ax[0].contourf(lon, environment.latitude.values[:], magnitude, transform=ccrs.PlateCarree(), alpha=0.2)
         # plt.colorbar()
 
-    # ani = animation.FuncAnimation(fig, animate, frames=Time_List, interval=100, fargs=(agents,environment))
+        plt.sca(ax[1])
+        ax[1].cla()
+        for agent_name in agents:
+            # agents[agent_name].data.interp(time = datetime_t).H2.plot()
+            H2 = agents[agent_name].data.interp(time = datetime_t).H2.values
+            batt = agents[agent_name].data.interp(time = datetime_t).batt.values
+            labels = ['Hydrogen','Battery']
+            width = 10
+            full_cap = [100,100]
+            act_cap = [H2, batt]
+            x = 2.5 * width * np.arange(len(labels))  # the label locations
+            rects1 = ax[1].bar(x - width/2, full_cap, width, label='Full Capacity')
+            rects2 = ax[1].bar(x + width/2, act_cap, width, label='Actual Capacity')
+            def autolabel(rects):
+                """Attach a text label above each bar in *rects*, displaying its height."""
+                for rect in rects:
+                    height = round(rect.get_height(),2)
+                    ax[1].annotate('{}'.format(height),
+                                xy=(rect.get_x() + rect.get_width() / 2, height),
+                                xytext=(0, 3),  # 3 points vertical offset
+                                textcoords="offset points",
+                                ha='center', va='bottom')
+
+
+            ax[1].set_title('Percent of Hydrogen and Battery Charge Remaining')
+            ax[1].set_xticks(x)
+            ax[1].set_xticklabels(labels)
+            ax[1].legend(loc='upper center', bbox_to_anchor=(1.45, 0.8))
+
+            autolabel(rects1)
+            autolabel(rects2)
+            # ax[1].bar([1,20],[25, batt],width=width, color = ['r','b'])
+            ax[1].set_ylabel('% Total Capacity')
+            ax[1].grid(True)
+            # ax[1].tight_layput()
+            # plt.title('Battery Band and H2 Storage Levels (%)')
+    plt.rcParams['animation.ffmpeg_path'] = u'/Users/davidbaxter/miniconda3/envs/carto/bin/ffmpeg'
     ani = animation.FuncAnimation(fig, animate, frames=list(itertools.islice(Time_List, 0, len(Time_List), 8)), interval=10, fargs=(agents,environment))
 
-    plt.show()
+    # Set up formatting for the movie files
+    # Writer = animation.writers['ffmpeg']
+    # writer = Writer(fps=15, metadata=dict(artist='Me'), bitrate=1800)
+    if _Save_Ani:
+        writer = animation.FFMpegWriter()
+        # writer = Writer(fps=15, metadata=dict(artist='Me'))
+        # ani = animation.FuncAnimation(fig, animate, frames=Time_List, interval=100, fargs=(agents,environment))
+        # ani = animation.FuncAnimation(fig, animate, frames=list(itertools.islice(Time_List, 0, len(Time_List), 8)), interval=10, fargs=(agents,environment), repeat=False)
+        ani.save('five_node2.mp4', writer=writer)
+        # ani.save('myAnimation.gif', writer='imagemagick', fps=30, dpi=100)
+        print('Done Saving Animation')
+        print(animation.writers.list())
+    else:
+        plt.show()
 
 def plot_env(environment, agents, lons, lats, datetime_t):
 
@@ -255,6 +324,10 @@ def fetch_datasets(lons, lats):
     dataset = dataset.sel(depth = 0, method = 'nearest')
     return dataset
 
+def fetch_solar(lons, lats):
+    dataset = xr.open_dataset("data/POWER_Global_Climatology_19cd8603.nc").sel(lon=slice(*lons), lat=slice(*lats))
+    return dataset
+
 def get_geo_inverse(earth, point1, point2):
     result_inverse = earth.inverse(point1,point2)
     result_inverse = np.asarray(result_inverse)
@@ -324,18 +397,26 @@ class plant():
         self.max_solar_daily_average = None
 
     def get_boat(self):
-        self.boat = design.Opt_Hull()
+        if _Cat:
+            self.boat = cat_design.Opt_Hull()
+        else:
+            self.boat = design.Opt_Hull()
         x0 = [50]
         sol = self.boat.minima(x0)
         # self.boat = sol
+        self.H2_Max = self.boat.hfc.Num_HFC_Containers * self.boat.hfc.hydrogen_tank_fuel_mass
+        self.Batt_Max = self.boat.solar.number_of_powerwalls * self.boat.solar.LipoCellEnergy
+
         self.hotel_load = self.boat.hfc.HotelLoads
         self.solar_area = self.boat.deckArea
-        self.max_solar_power_in = self.boat.solar.solar_area * self.solar_rating/1000 # kW
+        self.max_solar_power_in = self.boat.deckArea * self.solar_rating/1000 # kW
         self.max_solar_daily_average = self.max_solar_power_in * self.hrs_effective_solar * self.MPPT_eff * self.inverter_eff #kWh
         print(f'MAX SOLAR DAILY AVERAGE: {self.max_solar_daily_average} kWh')
 class Agent():
-    def __init__(self, earth = geo.Geodesic(), init_time = None, pose = [None,None,None], goal = None):
+    def __init__(self, earth = geo.Geodesic(), init_time = None, pose = None, goal = None):
         # Init Stuff
+        if pose == None:
+            pose = [None,None,None]
         self.earth = earth
         self.released = False
         self.init_time = init_time
@@ -364,13 +445,19 @@ class Agent():
         minval = 0.00001
         u = self.u
         v = self.v
-        u_goal = distance * math.cos(math.radians(course))/3600
-        v_goal = distance * math.sin(math.radians(course))/3600
+        u_goal = distance * math.sin(math.radians(course))/3600
+        v_goal = distance * math.cos(math.radians(course))/3600
 
         u_req = u_goal - u
         v_req = v_goal - v
-        den = v_req if abs(v_req) > minval else minval
-        heading = math.degrees(math.atan2(u_req,den))
+        # den = v_req if abs(v_req) > minval else minval
+        # heading = math.degrees(math.atan2(u_req,den))
+        den = u_req if abs(u_req) > minval else minval
+        angle_ccw_wrt_East = math.degrees(math.atan2(v_req,den))
+        heading = 90 - angle_ccw_wrt_East
+        if heading < 0:
+            # heading += 360
+            pass
         STW = np.hypot(u_req,v_req)
         return heading, STW
     def propulsion_power(self):
@@ -381,7 +468,10 @@ class Agent():
     def get_irradiance(self,hour, irradiance):
         pass
 
-    def setgoal(self, time, route = 'straight', goal_list = None, start_offset = 0, currents = [0,0], irradiance = 1000):
+    def setgoal(self, time, route = 'straight', goal_list = None, start_offset = 0, currents = None, irradiance = 1000, solar = 5):
+        if currents is None:
+            print('Current are NONE!!!!!!!!!!!!')
+            currents = [0,0]
         self.time = time
         pd_time = pd.to_datetime(time)
         hour = pd_time.hour
@@ -410,12 +500,14 @@ class Agent():
         self.batt, self.H2 = 100, 100
         distance, course = get_geo_inverse(self.earth, self.pose, self.goal)
         self.u, self.v = currents.u.values, currents.v.values
-        self.irradiance = irradiance
+        self.irradiance = solar
         self.heading, self.STW = self.action(distance, course)
         # print(f'FIRST COURSE = {course}')
         self.append_history()
         return 1
-    def update(self, time, currents = [0,0], irradiance = 1000):
+    def update(self, time, currents = None, irradiance = 1000, solar = 5):
+        if currents is None:
+            currents = [0,0]
         self.time = time
         pd_time = pd.to_datetime(time)
         hour = pd_time.hour
@@ -442,7 +534,11 @@ class Agent():
         # Set New environmental conditions for next time step
         distance, course = get_geo_inverse(self.earth, self.pose, self.goal)
         self.u, self.v = currents.u.values, currents.v.values
-        self.irradiance = irradiance
+        
+        # solar = 0
+        # self.u, self.v = 0,0
+
+        self.irradiance = solar
         self.heading, self.STW = self.action(distance, course)
         # print(f'FIRST COURSE = {course}')
         self.append_history()
@@ -456,26 +552,36 @@ class Agent():
         time_unit = np.timedelta64(1,'h')
         hours_passed = (time_unit/np.timedelta64(1,'h'))
 
-        propulsion_power = self.propulsion_power()
+        propulsion_power = self.propulsion_power() #kW
         load_power = propulsion_power + self.plant.hotel_load # kW
+        # print(f'\nHotel: {self.plant.hotel_load}')
         load_energy_out = load_power * hours_passed # kWh
+        # print(f'load_out: {load_energy_out}')
         # Later account for Temp STC adjustment
-        solar_in = self.plant.max_solar_power_in * (5/24) * (self.irradiance / self.plant.STC_irradiance)
+        solar_in = self.plant.max_solar_power_in * (self.irradiance / 24) 
+        # print(f'solar_in: {solar_in}')
+
         batt_in = solar_in * self.plant.MPPT_eff
+        # print(f'batt_in: {batt_in}')
         # Later modulate max solar daily average by actual STC irradiance fraction
         max_batt_out = (self.plant.max_solar_daily_average / 24)* hours_passed
-        if (load_energy_out / self.plant.inverter_eff) > max_batt_out:
+        # print(f'max_batt_out: {max_batt_out}')
+        if ((load_energy_out / self.plant.inverter_eff) > max_batt_out) & (self.batt < 51):
             batt_out = max_batt_out 
         else:
             batt_out = load_energy_out / self.plant.inverter_eff
         if self.batt <= 50:
             batt_out = 0
+        # print(f'batt_out: {batt_out}')
         HFC_out = max(0,(load_energy_out - batt_out * self.plant.inverter_eff) / self.plant.inverter_eff) #kWh
-        H2_out = HFC_out * 3600 / (1000 * self.plant.LHV_H2) / self.plant.HFC_efficiency
-        self.H2 -= (H2_out/self.plant.H2_Max)
+        # print(f'HFC_out: {HFC_out}')
+        H2_out = HFC_out * 3600 / (1000 * self.plant.LHV_H2) / self.plant.HFC_efficiency # kg
+        # print(f'H2_out: {H2_out}')
+        # print(f'H2 Max: {self.plant.H2_Max}')
+        self.H2 -= (H2_out/self.plant.H2_Max) * 100
         self.H2 = max(0, self.H2)
         batt_net = batt_in - batt_out
-        batt_per_change = batt_net / self.plant.Batt_Max
+        batt_per_change = (batt_net / self.plant.Batt_Max) * 100
         self.batt += batt_per_change
         self.batt = min(100, self.batt)
         # print()
@@ -544,9 +650,13 @@ def main():
 
     # Fetch the parent dataset
     environment_dataset = fetch_datasets([360-150, 360-50],[65, 20])
-
-
+    if _Environments['solar']:
+        solar_dataset = fetch_solar([-150, -50],[20, 65])
+        # kW-hr/m^2/day
+        # ds_sun = xr.open_dataset('data/POWER_Global_Climatology_19cd8603.nc')
+    print(solar_dataset)
     # Initialize Start Time, Stop Time, and Time Interval
+    # print(solar_dataset)
     start_datetime = get_start_date(environment_dataset)
     datetime_t = start_datetime # current time counter that increases with simulation
     print()
@@ -592,21 +702,24 @@ def main():
     simulation_timestep = np.timedelta64(1,'h')
     # Time_List = np.arange(start_datetime,stop_datetime,simulation_timestep)
     # Time_List = np.arange(start_datetime,start_datetime + np.timedelta64(transit_leg_hrs+1,'h'),simulation_timestep)
-    Time_List = np.arange(start_datetime,start_datetime + np.timedelta64(365*2,'D'),simulation_timestep)
+    Time_List = np.arange(start_datetime,start_datetime + np.timedelta64(45,'D'),simulation_timestep)
 
     # _Write = True
     if _Write:
         for datetime_t in Time_List:
+            time = pd.to_datetime(datetime_t)
+            month = time.month
             for agent in agents:
                 if agents[agent].released:
                     # currents = environment.interp(time = datetime_t, longitude = agents[agent].pose[0] + 360, latitude = agents[agent].pose[1])                
                     currents = environment.sel(time = datetime_t, longitude = agents[agent].pose[0] + 360, latitude = agents[agent].pose[1], method='nearest')                
-                    # agents[agent].update(datetime_t)
-                    agents[agent].update(datetime_t, currents= currents)
+                    solar = solar_dataset.sel(time = month, lon = agents[agent].pose[0], lat = agents[agent].pose[1], method='nearest').ALLSKY_SFC_SW_DWN.values 
+                    agents[agent].update(datetime_t, currents= currents, solar=solar)
                 if agents[agent].init_time <= datetime_t and agents[agent].released == False:
                     agents[agent].released = True
                     currents = environment.interp(time = datetime_t, longitude = start_point[0] + 360, latitude = start_point[1])
-                    agents[agent].setgoal(datetime_t, route = 'straight', goal_list = goal_list, start_offset = 0, currents= currents)
+                    solar = solar_dataset.sel(time = 1, lon = start_point[0], lat = start_point[1], method='nearest').ALLSKY_SFC_SW_DWN.values                
+                    agents[agent].setgoal(datetime_t, route = 'straight', goal_list = goal_list, start_offset = 0, currents= currents, solar=solar)
                     print(f'Release {agent}')
 
         # Store data
@@ -620,7 +733,6 @@ def main():
                 pass
     
     print()
-    print('Arrived Here')
 
     # Pickle agents and their history:
     if _Write:
@@ -631,22 +743,22 @@ def main():
                 pickle_agents[agent] = Agent(earth = None)
                 pickle_agents[agent].data = agents[agent].data
             pickle.dump(pickle_agents, w)
-
-    with open('agents.pickle', 'rb') as r:
-        # pickle.dump(agents['Agent_0'].data, f)
-        agents = pickle.load(r)
-        print('\nWant a pickle?')
-        print(agents)
+    else:
+        with open('agents.pickle', 'rb') as r:
+            # pickle.dump(agents['Agent_0'].data, f)
+            agents = pickle.load(r)
+            print('\nWant a pickle?')
+            print(agents)
 
     # plot_env(environment, agents, *sample_America(), datetime_t)
 
     plot_animation(environment, agents, *sample_America(), Time_List)
 
-    # print('\nAgent_0 Data')
-    # print(agents['Agent_0'].data)
+    print('\nAgent_0 Data')
+    print(agents['Agent_0'].data)
 
-    # print('\nAll variables in state:')
-    # print(list(agents['Agent_0'].data.data_vars.keys()))
+    print('\nAll variables in state:')
+    print(list(agents['Agent_0'].data.data_vars.keys()))
    
 
 
